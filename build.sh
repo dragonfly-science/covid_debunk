@@ -4,4 +4,5 @@ export RUN=
 
 make notebooks
 
-cp analysis/*.html petrou_follow_up
+cp analysis/*.html /publish
+cp analysis/*.html /output
