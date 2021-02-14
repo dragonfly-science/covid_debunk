@@ -218,7 +218,7 @@ but are still alive.
 
 Additionally, the plot shows no evidence of an upswing back towards zero. In other words, the
 data so far does not provide evidence that we are experiencing above average deaths to 
-compensate for those lost last year.
+compensate for those saved last year.
 
 ## Comparing 2020 deaths to the model
 
