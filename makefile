@@ -13,6 +13,11 @@ r_session: DOCKER_ARGS= -dit --rm -e DISPLAY=$$DISPLAY -v /tmp/.X11-unix:/tmp/.X
 r_session:
 	$(RUN) R
 
+notebooks: $(shell ls -d analysis/*.Rmd | sed 's/.Rmd/.html/g')
+
+analysis/%.html: analysis/%.Rmd
+	$(RUN) Rscript -e 'rmarkdown::render("$<")'
+
 docker:
 	docker build $(DOCKER_ARGS) --tag $(IMAGE):$(GIT_TAG) .
 	docker tag $(IMAGE):$(GIT_TAG) $(IMAGE):latest

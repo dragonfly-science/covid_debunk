@@ -1,0 +1,246 @@
+---
+title: Ted Petrou follow up analysis
+author: Caleb Moses
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+    prettydoc::html_pretty:
+      theme: tactile
+highlight: github
+---
+
+# Introduction
+
+This notebook investigates claims by Twitterer, data scientist and author Ted Petrou.
+
+```{r import-libraries, message = FALSE, echo = FALSE}
+library(tidyverse)
+library(lubridate)
+library(tweetrmd)
+library(prophet)
+library(here)
+
+# Set stan cores
+options(mc.cores = 8)
+
+# Set default ggplot theme
+theme_set(theme_minimal() + theme(plot.title = element_text(hjust = 0.5)))
+
+# Set knitr options
+knitr::opts_chunk$set(echo = FALSE, fig.align = "center", warning = FALSE, message = FALSE, fig.width = 12)
+
+```
+
+The offending tweet:
+
+```{r show-tweet, echo = FALSE, fig.align = "center"}
+
+include_tweet("https://twitter.com/TedPetrou/status/1358441124894015490")
+
+```
+
+In the thread, Petrou goes on to predict that notes a decrease in mortality among
+the aged 80+ cohort in 2020 (due to the March and August covid-19 lockdowns), and
+predicts that this decrease will be wiped out by an increase in mortality.
+
+## Reproducing the original plot
+
+He does so on the basis of the plot in his first tweet (shown above). We begin
+by reproducing his plot to ensure we are both using the same data.
+
+```{r reproduce-petrou-plot, message = FALSE}
+
+deaths_over80 <- read_csv(here('data/nz_weekly_deaths_by_age.csv')) %>%
+    rename(Age = series_name, Date = parameter, Deaths = value) %>%
+    select(Age, Date, Deaths) %>%
+    filter(Age == '80 and over')
+
+weekly_deaths_over80 <- deaths_over80 %>%
+    mutate(Date = floor_date(Date, unit = "month")) %>%
+    group_by(Age, Date) %>%
+    summarise(Deaths = mean(Deaths))
+
+deaths_2021 <- tibble(year = 2021, month = 2:12, day = 1) %>%
+    mutate(Date = as.Date(sprintf("%s-%s-%s", year, month, day)),
+           Deaths = 0, Age = '80 and over') %>%
+    select(Age, Date, Deaths)
+
+weekly_deaths_over80 <- bind_rows(weekly_deaths_over80, deaths_2021)
+
+weekly_deaths_over80 %>%
+    filter(year(Date) >= 2019) %>%
+    mutate(Year = as.factor(year(Date)),
+           Month = month(Date,label=TRUE,abbr=TRUE)) %>%
+    ggplot(aes(x = Month, y = Deaths, fill = Year)) +
+    geom_bar(stat = 'identity', position = 'dodge') +
+    ggtitle("New Zealand deaths per month aged 80+")
+
+```
+
+I used data from the stats NZ covid 19 data portal, available here:
+https://www.stats.govt.nz/experimental/covid-19-data-portal
+
+## Show observations from 2011
+
+One of the first things people looked at was the observations preceding 2019, which 
+begins in 2011. We show this plot here:
+
+```{r observations-from-2011}
+
+weekly_deaths_over80 %>%
+    mutate(Year = as.factor(year(Date)),
+           Month = month(Date,label=TRUE,abbr=TRUE)) %>%
+    ggplot(aes(x = Month, y = Deaths, fill = Year)) +
+    geom_bar(stat = 'identity', position = 'dodge') +
+    ggtitle("New Zealand deaths per month aged 80+")
+
+```
+
+Some have said that this shows the 2021 values are within the typical variation
+of the data, which I would say is not strictly clear from this graph because
+there is a long term trend and seasonality, which is visible when you view the
+full time series. 
+
+## Show full time series
+
+I show the full time series (with all observations) here:
+
+```{r full-time-series}
+
+deaths_over80 %>%
+    select(Age, Date, Deaths) %>%
+    filter(Age == '80 and over') %>%
+    ggplot(aes(x = Date, y = Deaths)) +
+    geom_point() +
+    expand_limits(x = min(deaths_over80$Date), y = 0)
+
+```
+
+# Modelling long term + seasonal trend for deaths over 80
+
+Ideally you would remove the long term + seasonal trend before you drawing a
+conclusion about whether the recent observations are ouside of the norm. We do this next:
+
+```{r fit-prophet}
+
+# Fit a model to the pre-2020 data
+m <- deaths_over80 %>%
+    filter(year(Date) < 2020) %>%
+    rename(ds = Date, y = Deaths) %>%
+    prophet(mcmc.samples = 2000,
+            weekly.seasonality = FALSE,
+            daily.seasonality = FALSE)
+
+future <- make_future_dataframe(m, periods = 500)
+
+forecast <- predict(m, future)
+
+deaths_over80 %>%
+    mutate(Predicted = if_else(year(Date) < 2020, 'Fit to model', 'Predicted')) %>%
+    rename(ds = Date, ytrue = Deaths) %>%
+    full_join(forecast) %>%
+    mutate(yhat = if_else(year(ds) >= 2020, NA_real_, yhat)) %>%
+    arrange(ds) %>%
+    filter(!is.na(Predicted)) %>%
+    ggplot(aes(x = ds, y = ytrue)) +
+    geom_ribbon(aes(ymin = yhat_lower,
+                    ymax = yhat_upper,
+                    fill = Predicted),
+                alpha = 0.5) +
+    geom_point() +
+    geom_line(aes(y = trend + additive_terms)) +
+    xlab("Date") +
+    ylab("Number of deaths") +
+    ggtitle("Weekly deaths for people aged 80+ in New Zealand")
+
+```
+
+We fit a model to the pre-2020 data and predict the 2020 values to provide
+a baseline for how many deaths were expected in each month.
+
+## Show long term + seasonal trend
+
+We can see the long term + seasonal trend here.
+
+```{r}
+
+prophet_plot_components(m, forecast)
+
+```
+
+## Calculate excess mortality post-2019
+
+Here we calculate the post-2019 excess mortality. This plot shows the total excess 
+deaths for the aged 80+ population which cannot be explained by the model.
+
+```{r}
+
+samples <- predictive_samples(m, future)
+
+trend <- as_tibble(samples$trend) %>%
+    gather(V1:V4000, key = 'chain', value = 'trend') %>%
+    group_by(chain) %>%
+    mutate(timestep = 1:n(),
+           chain = as.integer(str_remove(chain, "V")))
+
+yhat <- as_tibble(samples$yhat) %>%
+    gather(V1:V4000, key = 'chain', value = 'yhat') %>%
+    group_by(chain) %>%
+    mutate(timestep = 1:n(),
+           chain = as.integer(str_remove(chain, "V")))
+
+sample_data <- full_join(trend, yhat) %>%
+    select(chain, timestep, trend, yhat)
+
+sample_data <- deaths_over80 %>%
+    rename(ytrue = Deaths) %>%
+    mutate(timestep = 1:nrow(.)) %>%
+    full_join(sample_data) %>%
+    select(Age, Date, chain, timestep, ytrue, trend, yhat)
+
+sample_data %>%
+    filter(Date >= as.Date("2020-01-01")) %>%
+    group_by(chain) %>%
+    mutate(cum_delta = cumsum(yhat - ytrue)) %>%
+    group_by(Date) %>%
+    summarise(cum_delta_lower = quantile(cum_delta, 0.05),
+              cum_delta_upper = quantile(cum_delta, 0.95),
+              cum_delta = mean(cum_delta)) %>%
+    ggplot(aes(x = Date, ymin = cum_delta_lower, ymax = cum_delta_upper, y = cum_delta)) +
+    geom_line() +
+    geom_ribbon(fill = 'steelblue', alpha = 0.5) +
+    ggtitle("Cumulative excess mortality for people aged 80+ since Jan 2020") +
+    ylab("Excess mortality")
+
+```
+
+The plot shows there are between 500 and 1500 people aged 80+ who would have died in 2020
+but are still alive.
+
+Additionally, the plot shows no evidence of an upswing back towards zero. In other words, the
+data so far does not provide evidence that we are experiencing above average deaths to 
+compensate for those lost last year.
+
+## Comparing 2020 deaths to the model
+
+Lastly, we can specifically compare the 2020 values to the model. We can see the model is a
+poor fit, but this is okay because we the model represents the deaths we would have seen
+in a typical year.
+
+```{r}
+
+deaths_over80 %>%
+    rename(ds = Date, ytrue = Deaths) %>%
+    full_join(forecast) %>%
+    filter(year(ds) >= 2020) %>%
+    filter(ds < as.Date('2021-02-01')) %>%
+    ggplot(aes(x = ds, y = ytrue)) +
+    geom_ribbon(aes(ymin = yhat_lower,
+                    ymax = yhat_upper),
+                fill = "steelblue", alpha = 0.5) +
+    geom_point() +
+    geom_line(aes(y = trend + additive_terms)) +
+    xlab("Date") +
+    ylab("Deaths") +
+    ggtitle("Weekly deaths for people aged 80+ from 2020 to present")
+
+```
