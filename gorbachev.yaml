@@ -1,0 +1,4 @@
+docker: docker.dragonfly.co.nz/covid_debunk:1a47fe0
+cpus: 4
+memory: 4
+publish: petrou_follow_up
